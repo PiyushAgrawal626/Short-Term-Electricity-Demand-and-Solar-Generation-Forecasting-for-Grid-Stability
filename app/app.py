@@ -24,7 +24,7 @@ import data_access as da  # noqa: E402
 
 st.set_page_config(page_title="SolarCast-Grid", layout="wide")
 GW = 1e3
-TAG = {"OBSERVED": "#2b8a3e", "DERIVED": "#5c7cfa", "FORECAST": "#1971c2", "SIMULATED": "#e8590c", "OPTIMISED": "#9c36b5"}
+TAG = {"OBSERVED": "#2b8a3e", "DERIVED": "#5c7cfa", "FORECAST": "#1971c2", "SIMULATED": "#e8590c"}
 
 
 def tag(*kinds: str) -> None:
@@ -181,85 +181,6 @@ indicator, not observed curtailment.**""")
                      "surplus_share_of_solar_pct", "max_surplus_mw"]].round(2), hide_index=True)
 
 
-def page_optimisation():
-    st.title("Surplus-energy optimisation")
-    tag("FORECAST", "SIMULATED", "OPTIMISED")
-    from src.grid import network as gn
-    from src.optimization.evaluate import run_day
-    from src.optimization.lp import BatteryParams, DayInputs, Weights
-    from src.simulation.scenarios import map_day, reference_levels
-
-    def aggregate():
-        comp = da.csv("results/optimization_comparison.csv")
-        piv = comp.pivot(index="metric", columns="case", values="value")
-        st.markdown(f"**Saved evaluation over {int(comp.days.iloc[0])} test days (all four cases solved optimally on the "
-                    f"same days).** Losses, energies and voltages come from AC power flow.")
-        keep = ["pv_available_mwh", "curtailment_mwh", "solar_utilisation_pct", "loss_mwh", "received_export_mwh",
-                "import_mwh", "mean_daily_peak_import_mw", "mean_evening_ramp_3h_mw", "battery_throughput_mwh",
-                "v_violation_hours", "thermal_violation_hours", "export_violation_hours", "lp_slack_total"]
-        st.dataframe(piv.reindex(keep)[["baseline", "rule_based", "forecast_informed", "perfect_foresight"]].round(3),
-                     use_container_width=True)
-    da.guard(aggregate)
-
-    st.subheader("Run the optimiser for a day")
-    dec = da.js("results/grid_scenarios/grid_decisions.json")
-    c = st.columns(5)
-    day = c[0].date_input("Test day", value=pd.Timestamp("2025-04-12"), min_value=pd.Timestamp("2025-01-01"),
-                          max_value=pd.Timestamp("2025-06-24"), key="opt_day")
-    e = c[1].slider("Battery energy [MWh]", 0.0, 16.0, 6.0, 0.5)
-    pw = c[2].slider("Battery power [MW]", 0.0, 4.0, 1.5, 0.25)
-    soc0 = c[3].slider("Initial SoC", 0.1, 0.9, 0.5, 0.05)
-    flex = c[4].slider("Flexible load ±share", 0.0, 0.3, 0.10, 0.01)
-    c2 = st.columns(3)
-    pv_scale = c2[0].slider("PV capacity multiplier (×1.5 MW per site)", 0.2, 2.0, 1.0, 0.1)
-    exp_lim = c2[1].slider("Export limit at receiving bus [MW]", 0.0, 4.0, gn.EXPORT_LIMIT_MW, 0.25)
-    use_fc = c2[2].radio("Plan with", ["day-ahead forecast", "perfect foresight"], horizontal=True)
-    if st.button("Optimise and validate with AC power flow", type="primary"):
-        def go_run():
-            h = da.hourly()
-            refs = reference_levels(h)
-            idx = pd.date_range(pd.Timestamp(day), periods=24, freq="h")
-            act = map_day(h.loc[idx, "demand_mw"], h.loc[idx, "solar_mw"], refs)
-            fc = da.forecaster().day_ahead(h, pd.Timestamp(day))
-            fct = map_day(fc["demand_mw"], fc["solar_mw"], refs)
-            mk = lambda prof: DayInputs(prof.load_scale.to_numpy(), np.outer(prof.pv_pu, np.full(4, gn.PV_RATED_MW * pv_scale)),
-                                        flex_frac=flex, export_limit_mw=exp_lim)
-            net = gn.base_network()
-            gn.set_battery_bus(net, dec["battery_bus"])
-            bp = BatteryParams(bus=dec["battery_bus"], power_mw=pw, energy_mwh=e, soc_init=soc0)
-            case = "forecast_informed" if use_fc.startswith("day") else "perfect_foresight"
-            with st.spinner("Solving LP and running 48 AC power flows..."):
-                res = run_day(net, mk(act), mk(fct), bp, Weights(), cases=["baseline", case])
-            if any(r.get("realise_status") != "Optimal" for r in res.values()):
-                st.error(f"Solver status: { {k: (v.get('plan_status'), v.get('realise_status')) for k, v in res.items()} }")
-                return
-            b, o = res["baseline"], res[case]
-            m = pd.DataFrame({"baseline": b, case: o}).loc[["pv_available_mwh", "curtailment_mwh", "pv_used_mwh", "loss_mwh",
-                                                            "received_export_mwh", "import_mwh", "peak_import_mw",
-                                                            "evening_ramp_3h_mw", "vm_max_pu", "vm_min_pu",
-                                                            "v_violation_hours", "thermal_violation_hours",
-                                                            "export_violation_hours", "lp_slack_total"]].astype(float)
-            m["change"] = m[case] - m["baseline"]
-            st.dataframe(m.round(4), use_container_width=True)
-            st.caption(f"Plan status: {o['plan_status']}; realisation: {o['realise_status']}. Slack > 0 means the "
-                       f"forecast-based schedule needed constraint relaxation on the actual day; this counts as a violation.")
-            s = o["schedule"]
-            hrs = list(range(24))
-            f = go.Figure()
-            f.add_trace(go.Bar(x=hrs, y=s["ch_mw"], name="charge MW"))
-            f.add_trace(go.Bar(x=hrs, y=-s["dis_mw"], name="discharge MW (neg)"))
-            f.add_trace(go.Scatter(x=hrs, y=s["soc_mwh"], name="SoC MWh", yaxis="y2"))
-            f.add_trace(go.Scatter(x=hrs, y=act.pv_pu * 4 * gn.PV_RATED_MW * pv_scale, name="PV available (actual)", line=dict(color="#e69f00")))
-            f.add_trace(go.Scatter(x=hrs, y=fct.pv_pu * 4 * gn.PV_RATED_MW * pv_scale, name="PV available (forecast)", line=dict(color="#e69f00", dash="dash")))
-            f.add_trace(go.Scatter(x=hrs, y=-b["hourly"]["p_recv_mw"], name="baseline import at bus 0 (AC)", line=dict(color="#888")))
-            f.add_trace(go.Scatter(x=hrs, y=-o["hourly"]["p_recv_mw"], name=f"{case} import at bus 0 (AC)", line=dict(color="#9c36b5")))
-            f.update_layout(barmode="relative", height=420, xaxis_title="hour", yaxis_title="MW",
-                            yaxis2=dict(overlaying="y", side="right", title="MWh"))
-            st.plotly_chart(f, use_container_width=True)
-        da.guard(go_run)
-    with st.expander("Formulation"):
-        st.markdown((da.ROOT / "docs" / "OPTIMIZATION_METHODOLOGY.md").read_text(encoding="utf-8")
-                    if (da.ROOT / "docs" / "OPTIMIZATION_METHODOLOGY.md").exists() else "See src/optimization/lp.py")
 
 
 def page_grid():
@@ -384,7 +305,7 @@ Indian receiving-end metering.""")
 
 
 PAGES = {"Overview": page_overview, "Forecasting": page_forecasting, "Duck curve": page_duck,
-         "Optimisation": page_optimisation, "Grid & power delivery": page_grid, "Model evaluation": page_models}
+         "Grid & power delivery": page_grid, "Model evaluation": page_models}
 choice = st.sidebar.radio("Page", list(PAGES))
 st.sidebar.markdown("---")
 st.sidebar.caption("Provenance tags: " + ", ".join(TAG))

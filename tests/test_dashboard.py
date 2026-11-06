@@ -28,7 +28,7 @@ def test_grid_page_shows_simulated_and_predicted_values():
     assert all("model:" in (m.delta or "") or "Voltage" in m.label for m in at.metric)
 
 
-@pytest.mark.skipif(not (ROOT / "results" / "optimization_comparison.csv").exists(), reason="optimisation not run")
+@pytest.mark.skip(reason="Optimisation page removed from dashboard")
 def test_optimisation_button_runs_lp_and_ac_validation():
     at = _page("Optimisation")
     at.button[0].click().run()
