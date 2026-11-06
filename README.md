@@ -11,7 +11,7 @@ An end-to-end machine learning and power systems engineering framework for short
 
 ---
 
-## ⚡ Executive Summary
+## Executive Summary
 
 As renewable penetration increases, national power grids face dramatic ramping challenges and local distribution networks confront severe thermal and over-voltage risks. This repository provides an end-to-end framework—**SolarCast-Grid**—that bridges macro-scale transmission telemetry with micro-scale physical feeder stability:
 
